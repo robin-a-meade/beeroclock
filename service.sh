@@ -1,4 +1,35 @@
 #!/bin/bash
+
+if [[ -z $REMOTE_ADDR && $REMOTE_HOST ]]; then
+  # We must be running under xinetd
+  REMOTE_ADDR=$REMOTE_HOST
+fi
+
+diagnostic() {
+  echo "HTTP/1.0 200 OK"
+  echo "Connection: close"
+  echo "Transfer-Encoding: identity"
+  echo "Content-Type: text/plain; charset=utf-8"
+  echo "Content-Length: ${#1}"
+  echo "Date: $(TZ=UTC; date '+%a, %d %b %Y %T GMT')"
+  echo
+  echo -n "$1"
+  exit
+}
+
+remote_addr=$(curl -s -4 https://icanhazip.com/)
+
+
+IFS= read -r -d '' content <<EOF
+Hi
+REMOTE_ADDR: $REMOTE_ADDR
+remote_addr: $remote_addr
+-------------------------
+$(env)
+EOF
+#diagnostic "$content"
+
+
 read -r request
 while /bin/true; do
   read -r header
@@ -43,10 +74,18 @@ beertime() {
 # buildRespBody
 # param: $1 content-type (String)
 buildRespBody() {
+  # local remote_addr
+  # remote_addr=$REMOTE_ADDR
+  # if [[ $remote_addr == 127.*.*.*|::1 ]]; then
+  #   # We must be testing on localhost
+  #   # Use our external ip address for geolocation purposes
+  #   remote_addr=$(curl -s -4 https://icanhazip.com/)
+  # fi
   # request timezone
-  local reqTZ="$(curl -sSL "https://ipapi.co/${REMOTE_HOST}/timezone")"
+  local reqTZ="$(curl -sSL "https://ipapi.co/${REMOTE_ADDR}/timezone")"
   local time=
-  time="$(TZ=$reqTZ beertime)"
+  #time="$(TZ=$reqTZ beertime)"
+  time="$(TZ=HST beertime)"
 
   if [[ "$1" == 'plain' ]]; then
     printf "%s\r" "${time}"
@@ -69,25 +108,27 @@ buildRespBody() {
 #   $1 - content-type (String)
 #   $2 - body         (String)
 respond() {
-  echo "HTTP/1.1 200 OK"
+  echo "HTTP/1.0 200 OK"
   if [[ "$1" == 'application/json' ]]; then
-    echo "Connection: keep-alive"
+    #echo "Connection: keep-alive"
     echo "Transfer-Encoding: identity"
-  else
-    echo "Connection: close"
+  #else
+    #echo "Connection: close"
   fi
   echo "Content-Type: $1; charset=utf-8"
   echo "Content-Length: ${#2}"
   echo 'Link: </favicon.ico>; rel="icon"'
-  echo "Host: beero.cl"
+  #echo "Host: beero.cl"
   echo "Date: $(TZ=UTC; date '+%a, %d %b %Y %T GMT')"
   echo -e "\n$2"
 }
 
 # permRedirect
 permRedirect() {
-  echo 'HTTP/1.1 301 Moved Permanently'
-  echo 'Location: http://beero.cl/ock'
+  echo 'HTTP/1.0 302 Moved Temporarily'
+  #echo "Connection: keep-alive"
+  #echo 'Location: http://beero.cl/ock'
+  echo 'Location: /ock'
 }
 
 # parse url & path
@@ -112,13 +153,14 @@ elif [[ "$path" == '/ock' && "$query" == '' || "$query" == 'type=plain' ]]; then
   contentType='text/plain'
 elif [[ "$path" == '/favicon' || "$path" == '/favicon.ico' ]]; then # beer emoji
   altResp=true
-  echo 'HTTP/1.1 200 OK'
+  echo 'HTTP/1.0 200 OK'
   echo -e "Content-Type: image/x-icon; charset=binary\n"
-  cat '/root/beeroclock/favicon.ico'
+  #cat '/root/beeroclock/favicon.ico'
+  cat '/home/beeroclock/beeroclock/favicon.ico'
   exit 0
 elif [[ "${#query}" -gt 9 ]]; then # Unsupported Content-Type
   altResp=true
-  echo 'HTTP/1.1 415 Unsupported Media Type'
+  echo 'HTTP/1.0 415 Unsupported Media Type'
   echo -e "\n415 Unsupported Media Type"
   exit 0
 else # unknown route
