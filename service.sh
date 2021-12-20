@@ -1,11 +1,22 @@
 #!/bin/bash
 
+shopt -s extglob
+
+# We need to resolve the following inconsistency between systemd and xinetd:
+# - systemd uses REMOTE_ADDR (like CGI)
+# - xinetd uses REMOTE_HOST
+# We'll resolve this as follows:
+# If running under xinetd, set REMOTE_ADDR to REMOTE_HOST.
+# Then proceed to use REMOTE_ADDR in the remainder of the script.
 if [[ -z $REMOTE_ADDR && $REMOTE_HOST ]]; then
   # We must be running under xinetd
   REMOTE_ADDR=$REMOTE_HOST
 fi
 
-diagnostic() {
+# Note: I noticed xinetd gives a value of '::ffff:127.0.0.1' for localhost
+# That's an "IPv4-mapped IPv6" (https://stackoverflow.com/a/49796071)
+
+diagnostic_response() {
   echo "HTTP/1.0 200 OK"
   echo "Connection: close"
   echo "Transfer-Encoding: identity"
@@ -17,17 +28,26 @@ diagnostic() {
   exit
 }
 
-remote_addr=$(curl -s -4 https://icanhazip.com/)
+do_diagnostic() {
+  local remote_addr=$REMOTE_ADDR
+  if [[ $REMOTE_ADDR == @(127.*.*.*|::1|::ffff:127.*.*.*) ]]; then
+    # The client is on localhost
+    # Use our external ip address for testing the geolocation lookup
+    remote_addr=$(curl -s -4 https://icanhazip.com/)
+  fi
+  # request timezone
+  local reqTZ="$(curl -sSL "https://ipapi.co/${remote_addr}/timezone")"
 
-
-IFS= read -r -d '' content <<EOF
-Hi
+  IFS= read -r -d '' content <<EOF
 REMOTE_ADDR: $REMOTE_ADDR
 remote_addr: $remote_addr
+remote_addr: $reqTZ
 -------------------------
 $(env)
 EOF
-#diagnostic "$content"
+  diagnostic_response "$content"
+}
+#do_diagnostic
 
 
 read -r request
@@ -74,18 +94,24 @@ beertime() {
 # buildRespBody
 # param: $1 content-type (String)
 buildRespBody() {
-  # local remote_addr
-  # remote_addr=$REMOTE_ADDR
-  # if [[ $remote_addr == 127.*.*.*|::1 ]]; then
-  #   # We must be testing on localhost
-  #   # Use our external ip address for geolocation purposes
-  #   remote_addr=$(curl -s -4 https://icanhazip.com/)
-  # fi
-  # request timezone
-  local reqTZ="$(curl -sSL "https://ipapi.co/${REMOTE_ADDR}/timezone")"
+  local remote_addr=$REMOTE_ADDR
+  if [[ $REMOTE_ADDR == @(127.*.*.*|::1|::ffff:127.*.*.*) ]]; then
+    # The client is on localhost
+    # Use our external ip address for the geolocation lookup
+    remote_addr=$(curl -s -f -4 https://icanhazip.com/)
+    if [[ $? != 0 ]]; then
+      # No ipv4. Try ipv6:
+      remote_addr=$(curl -s -f -s http://icanhazip.com/)
+      if [[ $? != 0 ]]; then
+        # No ipv6 either. Something is wrong.
+        true # We need to call an error handler here
+      fi
+    fi
+  fi
+  # Lookup timezone
+  local reqTZ="$(curl -sSL "https://ipapi.co/${remote_addr}/timezone")"
   local time=
-  #time="$(TZ=$reqTZ beertime)"
-  time="$(TZ=HST beertime)"
+  time="$(TZ=$reqTZ beertime)"
 
   if [[ "$1" == 'plain' ]]; then
     printf "%s\r" "${time}"
@@ -94,7 +120,7 @@ buildRespBody() {
     if [[ "$time" =~ 'T\-minus' ]]; then
       beertime=false
     fi
-    echo "{\"success\":true,\"status_code\":200,\"status_text\":\"OK\",\"content\":{\"beertime?\":$beertime,\"message\":\"$(echo "${time}" | tr '\n' ' ')\"}}"
+    echo "{\"success\":true,\"status_code\":200,\"status_text\":\"OK\",\"content\":{\"beertime?\":$beertime,\"message\":\"$(echo "${time}" | tr '\n' ' ')\"}, \"TZ\":\"$reqTZ\"}"
   elif [[ "$1" == 'html' ]]; then
     time=$(echo "$time" | sed ':a;N;$!ba;s/\n/\<\/br\>/g')
     echo "<html><head><link rel='shortcut icon' type='image/x-icon' href='/favicon.ico'></head><body style='font-family: monospace; font-size: 32px;'><p>$time</p></body></html>"
